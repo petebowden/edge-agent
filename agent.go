@@ -16,18 +16,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const (
-	podDirectory = "/etc/kubernetes/manifests"
-)
-
-type manifests struct {
+type manifest struct {
 	PodSpec *v1alpha1.InternalPodspec
 	os.FileInfo
 }
 
 func main() {
 
-	nodeName := flag.String("nodename", "", "Name of the edge node")
+	nodeName := flag.String("nodename", "testedgenode", "Name of the edge node")
+	podDirectory := flag.String("k8s manifest directory", "./etc/kubernetes/manifests/", "Directory for kuberenetes manifests")
 
 	flag.Parse()
 
@@ -61,6 +58,8 @@ func main() {
 
 	desiredEdgePodSpecList := &v1alpha1.EdgePodList{}
 
+	// TODO: remove hardcoded namespace
+	// TODO: Search based on nodename
 	err = cl.List(context.Background(), desiredEdgePodSpecList, client.InNamespace("openshift-config"))
 	if err != nil {
 		fmt.Printf("failed to list pods in namespace default: %v\n", err)
@@ -69,13 +68,13 @@ func main() {
 
 	// Get all files in directory
 
-	files, err := ioutil.ReadDir(podDirectory)
+	files, err := ioutil.ReadDir(*podDirectory)
 	if err != nil {
-		fmt.Printf("Failed to read directory: " + podDirectory)
+		fmt.Printf("Failed to read directory: " + *podDirectory + " Has it been mounted?")
 		os.Exit(1)
 	}
 
-	currentEdgePodSpecList := []v1alpha1.InternalPodspec{}
+	currentManifests := []manifest{}
 
 	for _, fileInfo := range files {
 		byt, _ := ioutil.ReadFile(fileInfo.Name())
@@ -83,7 +82,11 @@ func main() {
 		if err := json.Unmarshal(byt, podSpec); err != nil {
 			fmt.Printf("Failed to read file: " + fileInfo.Name())
 		}
-		currentEdgePodSpecList = append(currentEdgePodSpecList, *podSpec)
+		manifest := manifest{
+			PodSpec:  podSpec,
+			FileInfo: fileInfo,
+		}
+		currentManifests = append(currentManifests, manifest)
 	}
 
 	// Sort the lists
@@ -91,22 +94,22 @@ func main() {
 		return desiredEdgePodSpecList.Items[i].Podspec.ObjectMeta.Name > desiredEdgePodSpecList.Items[j].Podspec.ObjectMeta.Name
 	})
 
-	sort.Slice(currentEdgePodSpecList, func(i, j int) bool {
-		return currentEdgePodSpecList[i].ObjectMeta.Name > currentEdgePodSpecList[j].ObjectMeta.Name
+	sort.Slice(currentManifests, func(i, j int) bool {
+		return currentManifests[i].PodSpec.ObjectMeta.Name > currentManifests[j].PodSpec.ObjectMeta.Name
 	})
 
 	i, j := 0, 0
 	// Compare the lists, updating or deleting as needed
-	for i < len(desiredEdgePodSpecList.Items) && j < len(currentEdgePodSpecList) {
+	for i < len(desiredEdgePodSpecList.Items) && j < len(currentManifests) {
 
 		desiredEdgePodName := desiredEdgePodSpecList.Items[i].Podspec.ObjectMeta.Name
-		currentEdgePodName := currentEdgePodSpecList[j].ObjectMeta.Name
+		currentEdgePodName := currentManifests[j].PodSpec.ObjectMeta.Name
 		if desiredEdgePodName == currentEdgePodName {
 
 			// Does EdgePod Spec match?
-			if !reflect.DeepEqual(desiredEdgePodSpecList.Items[j], currentEdgePodSpecList[i]) {
-				// Doesn't match, update
-				writeFile(desiredEdgePodSpecList.Items[j].Podspec)
+			if !reflect.DeepEqual(desiredEdgePodSpecList.Items[j], currentManifests[i]) {
+				// Doesn't match update file
+				writePodSpec(desiredEdgePodSpecList.Items[j].Podspec, currentManifests[i].FileInfo.Name(), *podDirectory)
 			}
 			//increment both pointers
 			i, j = i+1, j+1
@@ -114,34 +117,42 @@ func main() {
 		} else if desiredEdgePodName < currentEdgePodName {
 			// Do we need to delete a PodSpec on disk?
 			// Yes
-			//TODO: Delete file on filesystem
+			deletePodSpec(currentManifests[j].FileInfo.Name(), *podDirectory)
 			j++
 		} else {
 			// No, create a new PodSpec
-			//TODO: Create podspec on filesystem
+			writePodSpec(desiredEdgePodSpecList.Items[i].Podspec, desiredEdgePodName, *podDirectory)
 			i++
 		}
 	}
 
 	// Create remaining PodSpec
 	for ; i < len(desiredEdgePodSpecList.Items); i++ {
-		//TODO: Create podspec on filesystem
+		writePodSpec(desiredEdgePodSpecList.Items[i].Podspec,
+			desiredEdgePodSpecList.Items[i].Podspec.ObjectMeta.Name, *podDirectory)
 	}
 
 	// Delete remaining uneeded PodSpecs
-	for ; j < len(currentEdgePodSpecList); j++ {
-		//TODO: DeletePodSpec
+	for ; j < len(currentManifests); j++ {
+		deletePodSpec(currentManifests[j].FileInfo.Name(), *podDirectory)
 		j++
 	}
 
 }
 
-func writeFile(podSpec *v1alpha1.InternalPodspec, filename string) {
+func deletePodSpec(filename string, directory string) {
+	err := os.Remove(directory + filename)
+	if err != nil {
+		fmt.Printf("Failed to delete podspec file: " + filename + " Error: " + err.Error())
+	}
+}
+
+func writePodSpec(podSpec *v1alpha1.InternalPodspec, filename string, directory string) {
 	byt, err := json.Marshal(podSpec)
 	if err != nil {
 		fmt.Printf("Failed to marshal podspec: " + podSpec.Name + " error: " + err.Error())
 	}
-	err = ioutil.WriteFile(filename, byt, 0644)
+	err = ioutil.WriteFile(directory+filename, byt, 0644)
 	if err != nil {
 		fmt.Printf("Failed to write podspec: " + podSpec.Name + "to file: " + filename + " error: " + err.Error())
 

@@ -27,3 +27,6 @@ testbin/*
 vendor/
 .vscode/*
 !.vscode/launch.json
+
+/etc/*
+edge-agent
